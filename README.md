@@ -10,6 +10,7 @@ The following modules are required:
 * pip install beautifulsoup4
 * pip install discord.py
 * pip install colorlog
+* pip install python-dotenv
 
 Check the configs directory for the files that need to be configured.
 
