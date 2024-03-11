@@ -66,21 +66,28 @@ if __name__ == "__main__":
 
                 search_results = get_ebay_data(search_query, completed=False)
 
-                first_result = search_results[0]
-                first_result_price = float(first_result['price'].replace("$", "").replace(",", ""))
-                my_logger.info("First result price: " + str(first_result_price))
+                search_result = search_results[0]
+                for search_result in search_results:
+                    if search_result['id'] not in skip_item_list:
+                        search_result_price = float(search_result['price'].replace("$", "").replace(",", ""))
+                        my_logger.info("First result price: " + str(search_result_price))
 
-                if first_result_price <= float(max_price):
-                    discord_message = f"[Found a {friendly_name} for {first_result_price}]({first_result['link']})"
-                    client.run(TOKEN) # this isn't the best way to do this, ideally we'd use asyncio to run the bot in the background. But this way is easier for now.
-                    # the way it's set up, the bot will log in, send the message, then log out.
-                    # now add the item to the skip list
-                    with open("configs/skip_items.txt", "a") as file:
-                        file.write(f"{first_result['id']}\n")
-                    skip_item_list.append(first_result['id'])
-                else:
-                    my_logger.info("No deals found for " + friendly_name)
-                    time.sleep(60) # sleep for a minute
+                        if search_result_price <= float(max_price):
+                            my_logger.info(str(search_result_price) + " is less than " + str(max_price) + " for " + friendly_name)
+                            discord_message = f"[Found a {friendly_name} for {search_result_price}]({search_result['link']})"
+                            client.run(TOKEN) # this isn't the best way to do this, ideally we'd use asyncio to run the bot in the background. But this way is easier for now.
+                            # the way it's set up, the bot will log in, send the message, then log out.
+                            # now add the item to the skip list
+                            time.sleep(10)
+                            with open("configs/skip_items.txt", "a") as file:
+                                file.write(f"{search_result['id']}\n")
+                            skip_item_list.append(search_result['id'])
+                            break
+                        else:
+                            my_logger.info(str(search_result_price) + " is greater than " + str(max_price) + " for " + friendly_name)
+                            break
+                    
+                time.sleep(60) # sleep for a minute
         
         time.sleep(3600) # sleep for an hour
     
