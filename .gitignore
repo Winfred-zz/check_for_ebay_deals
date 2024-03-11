@@ -121,13 +121,7 @@ install.ps1
 
 # don't sync logs
 logs/
-
+configs/
 *.zip
 
-configs/apikey.txt
-configs/channelid.txt
 
-apikey.txt
-channelid.txt
-
-configs/
