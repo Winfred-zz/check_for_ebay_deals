@@ -124,5 +124,5 @@ logs/
 
 *.zip
 
-apikey.txt
-channelid.txt
+configs/apikey.txt
+configs/channelid.txt
