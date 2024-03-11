@@ -3,6 +3,7 @@
 # But it will then no longer alert on a second item that is more expensive either, that's a design choice for now.
 # if the skipped item is sold or a different item becomes cheaper, it will alert again on that search query.
 #
+#
 from myebayfunctions import get_ebay_data
 # open a csv file into an array of dicts
 import csv
