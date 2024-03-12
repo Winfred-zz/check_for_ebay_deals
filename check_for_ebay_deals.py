@@ -69,7 +69,6 @@ if __name__ == "__main__":
 
                 search_results = get_ebay_data(search_query, completed=False)
 
-                search_result = search_results[0]
                 for search_result in search_results:
                     if search_result['id'] not in skip_item_list:
                         search_result_price = float(search_result['price'].replace("$", "").replace(",", ""))
