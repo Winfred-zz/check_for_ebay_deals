@@ -35,6 +35,9 @@ async def on_ready():
     channel = client.get_channel(CHANNELID) #  general channel
     await channel.send(discord_message) #  Sends message to channel
     await client.close()
+
+discord_message = "starting up check_for_ebay_deals"
+client.run(TOKEN)
 # =============================================================================
 my_logger.info("loading items to skip from configs/skip_items.txt")
 skip_item_list = []

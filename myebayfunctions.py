@@ -1,6 +1,8 @@
 from bs4 import BeautifulSoup
 import requests
+from myhelperfunctions import logger
 
+my_logger = logger(log_filepath='logs/myebayfunctions.log', logger_name='myebayfunctions',debug=True)
 
 def get_ebay_data(search_query,pages=1,completed=False):
     headers = {
@@ -26,46 +28,43 @@ def get_ebay_data(search_query,pages=1,completed=False):
     salescount = None
     sellerrating = None
     while True:
-        page = requests.get('https://www.ebay.com/sch/i.html', params=params, headers=headers, timeout=30)
-        soup = BeautifulSoup(page.text, 'lxml')
-        
-        print(f"Extracting page: {params['_pgn']}")
+        try:
+            page = requests.get('https://www.ebay.com/sch/i.html', params=params, headers=headers, timeout=30)
+            soup = BeautifulSoup(page.text, 'lxml')
+            my_logger.info("Extracting page: " + str(params['_pgn']))
+            
+            for products in soup.select(".s-item__info"):
+                if products.select_one(".s-item__title span").text != "Shop on eBay":
+                    title = products.select_one(".s-item__title span").text
+                    if products.select_one(".s-item__subtitle span") is not None:
+                        subtitle = products.select_one(".s-item__subtitle span").text
+                        if subtitle != "Parts Only":
+                            price = products.select_one(".s-item__price").text
+                            if products.select_one(".s-item__seller-info-text") is not None:
+                                sellerinfo = products.select_one(".s-item__seller-info-text").text
+                                sellername = sellerinfo.split(" ")[0]
+                                salescount = sellerinfo.split(" ")[1]
+                                sellerrating = sellerinfo.split(" ")[2]
 
-        print("-" * 10)
-        
-        for products in soup.select(".s-item__info"):
-            if products.select_one(".s-item__title span").text != "Shop on eBay":
-                title = products.select_one(".s-item__title span").text
-                if products.select_one(".s-item__subtitle span") is not None:
-                    subtitle = products.select_one(".s-item__subtitle span").text
-                    if subtitle != "Parts Only":
-                        price = products.select_one(".s-item__price").text
-                        if products.select_one(".s-item__seller-info-text") is not None:
-                            sellerinfo = products.select_one(".s-item__seller-info-text").text
-                            sellername = sellerinfo.split(" ")[0]
-                            salescount = sellerinfo.split(" ")[1]
-                            sellerrating = sellerinfo.split(" ")[2]
+                            link = products.select_one(".s-item__link")["href"]
+                            id = link.split("/")[-1].split("?")[0]
+                            if "to" not in price:
+                                data.append({
+                                "title" : title,
+                                "subtitle" : subtitle,
+                                "price" : price,
+                                "sellerinfo" : sellerinfo,
+                                "link" : link,
+                                "sellername" : sellername,
+                                "salescount" : salescount,
+                                "sellerrating" : sellerrating,
+                                "id" : id
+                                })
 
-                        link = products.select_one(".s-item__link")["href"]
-                        id = link.split("/")[-1].split("?")[0]
-                        if "to" not in price:
-                            data.append({
-                            "title" : title,
-                            "subtitle" : subtitle,
-                            "price" : price,
-                            "sellerinfo" : sellerinfo,
-                            "link" : link,
-                            "sellername" : sellername,
-                            "salescount" : salescount,
-                            "sellerrating" : sellerrating,
-                            "id" : id
-                            })
-
-        #if soup.select_one(".pagination__next"): # just keep going until you run out of pages.
-        #    params['_pgn'] += 1
-        #else:
-        #    break
-        params['_pgn'] += 1
-        if params['_pgn'] > pages:
+            params['_pgn'] += 1
+            if params['_pgn'] > pages:
+                break
+        except Exception as e:
+            my_logger.error("Error: " + str(e))
             break
     return data
