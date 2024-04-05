@@ -1,4 +1,5 @@
 from bs4 import BeautifulSoup
+import time
 import requests
 from myhelperfunctions import logger
 
@@ -29,7 +30,14 @@ def get_ebay_data(search_query,pages=1,completed=False):
     sellerrating = None
     while True:
         try:
-            page = requests.get('https://www.ebay.com/sch/i.html', params=params, headers=headers, timeout=30)
+            while True:
+                try:
+                    page = requests.get('https://www.ebay.com/sch/i.html', params=params, headers=headers, timeout=30)
+                    break
+                except requests.exceptions.RequestException as e:
+                    my_logger.error("Requests get Error: " + str(e))
+                    time.sleep(60)
+            
             soup = BeautifulSoup(page.text, 'lxml')
             my_logger.info("Extracting page: " + str(params['_pgn']))
             

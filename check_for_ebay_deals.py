@@ -5,7 +5,6 @@
 #
 #
 from myebayfunctions import get_ebay_data
-# open a csv file into an array of dicts
 import csv
 import time
 import discord
