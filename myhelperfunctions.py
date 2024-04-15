@@ -2,6 +2,12 @@ import logging
 import colorlog
 from logging.handlers import RotatingFileHandler
 import sys
+import os
+
+log_folder = "logs"
+if not os.path.isdir(log_folder):
+    print("Logs doesn't exists")
+    os.mkdir(log_folder)
 #======================================================================
 # logger
 #======================================================================
