@@ -7,36 +7,35 @@
 from myebayfunctions import get_ebay_data
 import csv
 import time
+import platform
 import discord
 import os
 from myhelperfunctions import logger,sigterm_handler
 import signal
 from datetime import datetime
 from dotenv import load_dotenv
+from discord.ext import commands, tasks
+from discord.ext.commands import Context
+import functools
+import typing
+import asyncio
 
 signal.signal(signal.SIGTERM, sigterm_handler)
 my_logger = logger(log_filepath='logs/check_for_ebay_deals.log', logger_name='check_for_ebay_deals',debug=True)
 my_logger.info("starting up")
+intents = discord.Intents.default()
 
 # =============================================================================
-load_dotenv()
-TOKEN = os.getenv('DISCORD_TOKEN')
-CHANNELID = int(os.getenv('CHANNELID'))
+def to_thread(func: typing.Callable) -> typing.Coroutine:
+    '''
+    This is a helper function to run blocking functions in a separate thread to prevent the "Heartbeat blocked for more than 10 seconds" warning
+    https://stackoverflow.com/questions/65881761/discord-gateway-warning-shard-id-none-heartbeat-blocked-for-more-than-10-second
+    '''
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.to_thread(func, *args, **kwargs)
+    return wrapper
 
-
-# =============================================================================
-# Discord related
-# =============================================================================
-client = discord.Client(intents=discord.Intents.default())
-@client.event
-async def on_ready():
-    my_logger.info(str(client.user) + " has connected to Discord")
-    channel = client.get_channel(CHANNELID) #  general channel
-    await channel.send(discord_message) #  Sends message to channel
-    await client.close()
-
-discord_message = "starting up check_for_ebay_deals"
-client.run(TOKEN)
 # =============================================================================
 my_logger.info("loading items to skip from configs/skip_items.txt")
 skip_item_list = []
@@ -44,10 +43,13 @@ with open("configs/skip_items.txt", "r") as file:
     for line in file:
         skip_item_list.append(line.strip())
 # =============================================================================
-if __name__ == "__main__":
-    while True:
-        # if it's between 12pm and 2am, check for deals
-        if datetime.now().hour > 12 or datetime.now().hour < 2:
+@to_thread
+def load_deal_data_and_start_checking():
+    '''
+    This function loads the deals to check from ebay_deals_to_check.csv
+    and then checks for new deals and price drops
+    '''
+    if datetime.now().hour > 12 or datetime.now().hour < 2:
             # =============================================================================
             my_logger.info("loading deals to check from from configs/ebay_deals_to_check.csv")
             csvfile = "configs/ebay_deals_to_check.csv"
@@ -61,6 +63,7 @@ if __name__ == "__main__":
                     # Append each row (as a dictionary) to the list
                     data_list.append(row)
             # =============================================================================
+            discord_messages = []
             for data in data_list:
                 search_query = data['search_query']
                 max_price = data['max_price']
@@ -76,9 +79,7 @@ if __name__ == "__main__":
                         if search_result_price <= float(max_price):
                             my_logger.info(str(search_result_price) + " is less than " + str(max_price) + " for " + friendly_name)
                             discord_message = f"[Found a {friendly_name} for {search_result_price}]({search_result['link']})"
-                            client.run(TOKEN) # this isn't the best way to do this, ideally we'd use asyncio to run the bot in the background. But this way is easier for now.
-                            # the way it's set up, the bot will log in, send the message, then log out.
-                            # now add the item to the skip list
+                            discord_messages.append(discord_message)
                             time.sleep(10)
                             with open("configs/skip_items.txt", "a") as file:
                                 file.write(f"{search_result['id']}\n")
@@ -89,6 +90,136 @@ if __name__ == "__main__":
                             break
                     
                 time.sleep(60) # sleep for a minute
-        
-        time.sleep(3600) # sleep for an hour
-    
+    return discord_messages
+
+# =============================================================================
+# This is the main class for the discord bot
+# =============================================================================
+class DiscordBot(commands.Bot):
+    def __init__(self) -> None:
+        super().__init__(
+            command_prefix=commands.when_mentioned_or("!"),
+            intents=intents,
+            help_command=None,
+        )
+        """
+        This creates custom bot variables so that we can access these variables in cogs more easily.
+
+        For example, The config is available using the following code:
+        - self.config # In this class
+        - bot.config # In this file
+        - self.bot.config # In cogs
+        """
+    @tasks.loop(minutes=60.0)
+    async def status_task(self) -> None:
+        """
+        Setup the check website task to run every 60 minutes
+        """
+        discord_messages = await load_deal_data_and_start_checking()
+        if discord_messages:
+            channel = self.get_channel(CHANNELID)
+            my_logger.info(f"Sending messages to channel")
+            for discord_message in discord_messages:
+                await channel.send(discord_message)
+
+    @status_task.before_loop
+    async def before_status_task(self) -> None:
+        """
+        Before starting the status changing task, we make sure the bot is ready
+        """
+        await self.wait_until_ready()
+
+    async def setup_hook(self) -> None:
+        """
+        This will just be executed when the bot starts the first time.
+        """
+        my_logger.info(f"Logged in as {self.user.name}")
+        my_logger.info(f"discord.py API version: {discord.__version__}")
+        my_logger.info(f"Python version: {platform.python_version()}")
+        my_logger.info(
+            f"Running on: {platform.system()} {platform.release()} ({os.name})"
+        )
+        my_logger.info("-------------------")
+        self.status_task.start()
+
+
+    async def on_command_completion(self, context: Context) -> None:
+        """
+        The code in this event is executed every time a normal command has been *successfully* executed.
+
+        :param context: The context of the command that has been executed.
+        """
+        full_command_name = context.command.qualified_name
+        split = full_command_name.split(" ")
+        executed_command = str(split[0])
+        if context.guild is not None:
+            my_logger.info(
+                f"Executed {executed_command} command in {context.guild.name} (ID: {context.guild.id}) by {context.author} (ID: {context.author.id})"
+            )
+        else:
+            my_logger.info(
+                f"Executed {executed_command} command by {context.author} (ID: {context.author.id}) in DMs"
+            )
+
+    async def on_command_error(self, context: Context, error) -> None:
+        """
+        The code in this event is executed every time a normal valid command catches an error.
+
+        :param context: The context of the normal command that failed executing.
+        :param error: The error that has been faced.
+        """
+        if isinstance(error, commands.CommandOnCooldown):
+            minutes, seconds = divmod(error.retry_after, 60)
+            hours, minutes = divmod(minutes, 60)
+            hours = hours % 24
+            embed = discord.Embed(
+                description=f"**Please slow down** - You can use this command again in {f'{round(hours)} hours' if round(hours) > 0 else ''} {f'{round(minutes)} minutes' if round(minutes) > 0 else ''} {f'{round(seconds)} seconds' if round(seconds) > 0 else ''}.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+        elif isinstance(error, commands.NotOwner):
+            embed = discord.Embed(
+                description="You are not the owner of the bot!", color=0xE02B2B
+            )
+            await context.send(embed=embed)
+            if context.guild:
+                my_logger.warning(
+                    f"{context.author} (ID: {context.author.id}) tried to execute an owner only command in the guild {context.guild.name} (ID: {context.guild.id}), but the user is not an owner of the bot."
+                )
+            else:
+                my_logger.warning(
+                    f"{context.author} (ID: {context.author.id}) tried to execute an owner only command in the bot's DMs, but the user is not an owner of the bot."
+                )
+        elif isinstance(error, commands.MissingPermissions):
+            embed = discord.Embed(
+                description="You are missing the permission(s) `"
+                + ", ".join(error.missing_permissions)
+                + "` to execute this command!",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+        elif isinstance(error, commands.BotMissingPermissions):
+            embed = discord.Embed(
+                description="I am missing the permission(s) `"
+                + ", ".join(error.missing_permissions)
+                + "` to fully perform this command!",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+        elif isinstance(error, commands.MissingRequiredArgument):
+            embed = discord.Embed(
+                title="Error!",
+                # We need to capitalize because the command arguments have no capital letter in the code and they are the first word in the error message.
+                description=str(error).capitalize(),
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+        else:
+            raise error
+
+if __name__ == "__main__":
+    load_dotenv()
+    DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+    CHANNELID = int(os.getenv('CHANNELID'))
+    bot = DiscordBot()
+    bot.run(DISCORD_TOKEN)
