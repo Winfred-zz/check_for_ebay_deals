@@ -36,7 +36,7 @@ def get_ebay_data(search_query,pages=1,completed=False):
                     break
                 except requests.exceptions.RequestException as e:
                     my_logger.error("Requests get Error: " + str(e))
-                    time.sleep(60)
+                    time.sleep(300)
             
             soup = BeautifulSoup(page.text, 'lxml')
             my_logger.info("Extracting page: " + str(params['_pgn']))

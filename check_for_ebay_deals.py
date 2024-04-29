@@ -49,47 +49,47 @@ def load_deal_data_and_start_checking():
     This function loads the deals to check from ebay_deals_to_check.csv
     and then checks for new deals and price drops
     '''
+    discord_messages = []
     if datetime.now().hour > 12 or datetime.now().hour < 2:
-            # =============================================================================
-            my_logger.info("loading deals to check from from configs/ebay_deals_to_check.csv")
-            csvfile = "configs/ebay_deals_to_check.csv"
-            # creating a csv reader object here, so it reloads the file each time and we don't have to restart the bot when updating the csv
-            with open(csvfile, mode='r') as file:
-                csv_reader = csv.DictReader(file)
-                # Initialize an empty list to store the dictionaries
-                data_list = []
-                # Iterate through each row in the CSV file
-                for row in csv_reader:
-                    # Append each row (as a dictionary) to the list
-                    data_list.append(row)
-            # =============================================================================
-            discord_messages = []
-            for data in data_list:
-                search_query = data['search_query']
-                max_price = data['max_price']
-                friendly_name = data['friendly_name']
+        # =============================================================================
+        my_logger.info("loading deals to check from from configs/ebay_deals_to_check.csv")
+        csvfile = "configs/ebay_deals_to_check.csv"
+        # creating a csv reader object here, so it reloads the file each time and we don't have to restart the bot when updating the csv
+        with open(csvfile, mode='r') as file:
+            csv_reader = csv.DictReader(file)
+            # Initialize an empty list to store the dictionaries
+            data_list = []
+            # Iterate through each row in the CSV file
+            for row in csv_reader:
+                # Append each row (as a dictionary) to the list
+                data_list.append(row)
+        # =============================================================================
+        for data in data_list:
+            search_query = data['search_query']
+            max_price = data['max_price']
+            friendly_name = data['friendly_name']
 
-                search_results = get_ebay_data(search_query, completed=False)
+            search_results = get_ebay_data(search_query, completed=False)
 
-                for search_result in search_results:
-                    if search_result['id'] not in skip_item_list:
-                        search_result_price = float(search_result['price'].replace("$", "").replace(",", ""))
-                        my_logger.info("First result price: " + str(search_result_price))
+            for search_result in search_results:
+                if search_result['id'] not in skip_item_list:
+                    search_result_price = float(search_result['price'].replace("$", "").replace(",", ""))
+                    my_logger.info("First result price: " + str(search_result_price))
 
-                        if search_result_price <= float(max_price):
-                            my_logger.info(str(search_result_price) + " is less than " + str(max_price) + " for " + friendly_name)
-                            discord_message = f"[Found a {friendly_name} for {search_result_price}]({search_result['link']})"
-                            discord_messages.append(discord_message)
-                            time.sleep(10)
-                            with open("configs/skip_items.txt", "a") as file:
-                                file.write(f"{search_result['id']}\n")
-                            skip_item_list.append(search_result['id'])
-                            break
-                        else:
-                            my_logger.info(str(search_result_price) + " is greater than " + str(max_price) + " for " + friendly_name)
-                            break
-                    
-                time.sleep(60) # sleep for a minute
+                    if search_result_price <= float(max_price):
+                        my_logger.info(str(search_result_price) + " is less than " + str(max_price) + " for " + friendly_name)
+                        discord_message = f"[Found a {friendly_name} for {search_result_price}]({search_result['link']})"
+                        discord_messages.append(discord_message)
+                        time.sleep(10)
+                        with open("configs/skip_items.txt", "a") as file:
+                            file.write(f"{search_result['id']}\n")
+                        skip_item_list.append(search_result['id'])
+                        break
+                    else:
+                        my_logger.info(str(search_result_price) + " is greater than " + str(max_price) + " for " + friendly_name)
+                        break
+                
+            time.sleep(60) # sleep for a minute
     return discord_messages
 
 # =============================================================================
