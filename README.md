@@ -21,3 +21,4 @@ It's assumed you've already associated your bot with your server/channel.
 Once the CSV file and config files are configured, if you run check_for_ebay_deals.py it will enter a loop and check the search queries once per hour.
 
 Currently the script is set up to not alert between 2am and 12pm.
+More about my projects: https://winfred.com
