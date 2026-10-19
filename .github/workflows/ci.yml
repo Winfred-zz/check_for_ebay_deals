@@ -29,6 +29,7 @@ jobs:
       - name: Lint
         run: python -m ruff check .
       - name: Test offline
+        run: python -m pytest -q --junitxml=test-results.xml
       - name: Exercise offline CLI
         run: >-
           python check_for_ebay_deals.py --once --dry-run
