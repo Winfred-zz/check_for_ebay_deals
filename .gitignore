@@ -122,6 +122,69 @@ install.ps1
 # don't sync logs
 logs/
 configs/
+data/
 *.zip
 
 copy_files_and_restart_bot.ps1
+
+# Shared project defaults (preserve existing project-specific exclusions above)
+# Virtual environments, build output, and tool caches
+*.egg
+.ruff_cache/
+node_modules/
+
+# Databases and SQLite sidecars
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+*.db.bak*
+*.sqlite-backup-*
+*.sqlite-scratch*
+
+# Logs and runtime state (keep dependency lockfiles trackable)
+*.[lL][oO][gG]*
+log/
+runs/
+
+# Temporary files
+temp/
+tmp/
+scratch*
+*.tmp
+
+# Secrets and credentials
+*.key
+*.pem
+id_rsa*
+*.pfx
+*.p12
+*.crt
+
+# Local agent instructions, handoffs, and editor settings
+/AGENTS.md
+/handoff/
+handoffs/
+.claude/
+.obsidian/
+.cursor/
+.idea/
+.vscode/
+.vs/
+GEMINI.md
+
+# OS metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Keep safe configuration examples trackable
+!*.example.*
+!.example*

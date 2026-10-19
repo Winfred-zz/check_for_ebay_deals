@@ -1,16 +1,16 @@
-FROM python:3
+FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y git
-RUN python -m pip install --upgrade pip
-# can use this if pip keeps using cached modules (it does)
-RUN pip cache purge
+COPY requirements.txt constraints.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt -c /tmp/constraints.txt
 
-RUN pip install httpx[http2] parsel nested_lookup
-RUN pip install requests
-RUN pip install beautifulsoup4
-RUN pip install discord.py
-RUN pip install colorlog
-RUN pip install python-dotenv
+COPY check_for_ebay_deals.py config.py acquire.py parse.py selection.py notify.py deliver.py state.py clock.py /app/
 
-WORKDIR /data/check_for_ebay_deals
-CMD [ "python", "check_for_ebay_deals.py" ]
+RUN useradd --shell /bin/sh app \
+    && install -d -m 1777 /data/logs \
+    && chown -R app:app /data /app
+
+USER app
+WORKDIR /data
+VOLUME ["/data"]
+
+CMD ["python", "/app/check_for_ebay_deals.py"]

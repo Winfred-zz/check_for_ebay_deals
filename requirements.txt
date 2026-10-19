@@ -1,0 +1,7 @@
+-c constraints.txt
+requests
+beautifulsoup4
+lxml
+discord.py
+colorlog
+python-dotenv
