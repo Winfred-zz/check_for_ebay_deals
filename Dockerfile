@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY requirements.txt constraints.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt -c /tmp/constraints.txt
 
 COPY check_for_ebay_deals.py config.py acquire.py parse.py selection.py notify.py deliver.py state.py clock.py /app/
 

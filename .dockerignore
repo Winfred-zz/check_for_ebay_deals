@@ -9,7 +9,6 @@ __pycache__/
 AGENTS.md
 handoff/
 handoffs/
-constraints.txt
 configs/
 data/
 logs/
