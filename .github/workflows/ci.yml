@@ -22,12 +22,19 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
-      - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+            constraints.txt
+            requirements.lock
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.lock
       - name: Check dependency consistency
         run: python -m pip check
       - name: Lint
         run: python -m ruff check .
+      - name: Typecheck
+        run: >-
+          basedpyright
+          config.py parse.py selection.py notify.py deliver.py
+          state.py acquire.py clock.py check_for_ebay_deals.py
       - name: Test offline
         run: python -m pytest -q --junitxml=test-results.xml
       - name: Exercise offline CLI
@@ -44,3 +51,64 @@ jobs:
           path: test-results.xml
           if-no-files-found: ignore
           retention-days: 7
+  container:
+    name: Container offline smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FIXTURES: ${{ github.workspace }}/tests/fixtures/offline-scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t check_for_ebay_deals .
+      - name: Fixture dry-run with no network prints four alerts
+        run: |
+          docker run --rm --network none \
+            -v "$FIXTURES:/fixtures:ro" -v deals-ci:/data \
+            check_for_ebay_deals python /app/check_for_ebay_deals.py \
+            --once --dry-run --fixture-dir /fixtures \
+            --csv /fixtures/smoke.csv --data-dir /data \
+            2>/dev/null | grep -c "DRY-RUN ALERT" | grep -qx 4
+      - name: Quiet pending survives recreate via named volume
+        run: |
+          run() {
+            docker run --rm --network none \
+              -v "$FIXTURES:/fixtures:ro" -v deals-ci:/data \
+              check_for_ebay_deals python /app/check_for_ebay_deals.py \
+              --once --fixture-dir /fixtures --csv /fixtures/smoke.csv \
+              --data-dir /data --at "$1"
+          }
+          run 2026-10-19T05:00:00Z > /tmp/quiet.log 2>&1
+          grep -q "zero delivery attempts" /tmp/quiet.log
+          run 2026-10-19T13:00:00Z > /tmp/open.log 2>&1
+          grep -q "alert delivered and marked sent" /tmp/open.log
+      - name: Second container on a live lock exits 3
+        run: |
+          docker run -d --name deals-lock --network none \
+            -e CHECK_FOR_EBAY_DEALS_SCAN_SLEEP_SECONDS=60 \
+            -v "$FIXTURES:/fixtures:ro" -v deals-ci:/data \
+            check_for_ebay_deals python /app/check_for_ebay_deals.py \
+            --once --fixture-dir /fixtures --csv /fixtures/smoke.csv \
+            --data-dir /data --at 2026-10-19T13:00:00Z
+          sleep 4
+          set +e
+          docker run --rm --network none -v "$FIXTURES:/fixtures:ro" \
+            -v deals-ci:/data check_for_ebay_deals \
+            python /app/check_for_ebay_deals.py --once \
+            --fixture-dir /fixtures --csv /fixtures/smoke.csv \
+            --data-dir /data --at 2026-10-19T13:00:00Z
+          code=$?
+          set -e
+          test "$code" -eq 3
+      - name: Cooperative stop drains within the grace window
+        run: |
+          start=$(date +%s)
+          docker stop --timeout 15 deals-lock
+          test $(( $(date +%s) - start )) -lt 12
+          test "$(docker inspect deals-lock \
+            --format '{{.State.ExitCode}}')" = 0
+      - name: Clean up containers and volumes
+        if: always()
+        run: |
+          docker rm -f deals-lock || true
+          docker volume rm deals-ci || true
