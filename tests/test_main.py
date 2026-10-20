@@ -79,7 +79,7 @@ def test_corrupt_db_scan_refused(tmp_path):
     (data / "state.sqlite").write_bytes(b"this is not a sqlite database")
     result = run_cli(["--once", *fixture_args(data)], tmp_path)
     assert result.returncode == 2
-    assert "corrupt or unsupported" in result.stderr
+    assert "state database partial or missing tables" in result.stderr
 
 
 def test_live_network_startup_refused(tmp_path):
@@ -166,3 +166,37 @@ def test_quiet_window_stores_pending_then_window_open_delivers(tmp_path):
     assert "STUB DELIVERY" in open_run.stdout
     assert not pending_rows(data)
     assert set(stored) <= set(sent_rows(data))
+
+
+LAYOUT_FIXTURES = ROOT / "tests" / "fixtures" / "layout"
+
+
+def test_layout_fixture_classifies_each_page_shape(tmp_path):
+    data = tmp_path / "data"
+    result = run_cli(
+        [
+            "--once",
+            "--fixture-dir",
+            str(LAYOUT_FIXTURES),
+            "--csv",
+            str(LAYOUT_FIXTURES / "layout.csv"),
+            "--data-dir",
+            str(data),
+            "--at",
+            "2026-10-19T13:00:00Z",
+        ],
+        tmp_path,
+    )
+    assert result.returncode == 0
+    out = result.stderr
+    # 10-results page with no cards: suspicious, never a clean empty scan.
+    assert "'ten query' has neither cards nor known markers" in out
+    # Deny page with decoy cards: denied wins over card presence.
+    assert "looks like a deny/challenge page" in out
+    # Mystery page: suspicious, not treated as empty success.
+    assert "'mystery query' has neither cards nor known markers" in out
+    # Genuine zero page: accepted as a clean empty scan (no warning).
+    assert 'zero query' not in out.replace("zero delivery attempts", "")
+    # Suspicious pages produce no alerts; the zero page produces none either.
+    assert "STUB DELIVERY" not in result.stdout
+    assert not pending_rows(data)
