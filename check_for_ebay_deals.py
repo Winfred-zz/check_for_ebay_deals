@@ -241,9 +241,10 @@ def load_fixture_manifest(fixture_dir: str, rows: list[SearchRow]) -> dict[str, 
         raise config.ConfigError(f"fixture manifest unreadable: {exc}") from exc
     if not isinstance(raw, dict):
         raise config.ConfigError("fixture manifest must map query to html file")
+    entries = cast("dict[object, object]", raw)
     root = os.path.realpath(fixture_dir)
     manifest: dict[str, str] = {}
-    for query, target in raw.items():
+    for query, target in entries.items():
         if not isinstance(query, str) or not isinstance(target, str):
             raise config.ConfigError(
                 "fixture manifest must map string queries to string files"
