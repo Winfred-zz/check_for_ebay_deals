@@ -9,7 +9,10 @@ idempotent, and the lock is reacquirable immediately after exit.
 Readiness is gated on a lifecycle log line, never on the lock file: the
 lock is written before the SIGTERM handler is installed, so a signal in
 that window would be fatal — the readiness marker proves the handler is
-armed before any signal is sent.
+armed before any signal is sent. Send-phase tests gate further on the
+pending table: the signal must land mid-send (after alerts are durably
+persisted), never mid-scan, where a correct cancel legitimately leaves
+zero rows — a clock-only gate raced the scan on slow runners.
 """
 
 import os
@@ -68,6 +71,35 @@ def start_cli(data: Path, log_path: Path, extra: list[str],
         time.sleep(0.05)
 
 
+def wait_for_delivery_phase(data: Path, proc: "subprocess.Popen[str]") -> None:
+    """Block until the scan finished and alerts are durably persisted.
+
+    deliver() begins only after every discovered alert is in the
+    pending table, and the stub's per-send block keeps the first send
+    in flight for seconds: signaling the moment a row appears lands
+    mid-send. Polling the table, not the clock, is what makes the
+    seam deterministic on slow runners.
+    """
+    deadline = time.monotonic() + 20
+    while True:
+        count = 0
+        try:
+            con = sqlite3.connect(str(data / "state.sqlite"), timeout=1)
+            try:
+                count = con.execute("SELECT COUNT(*) FROM pending").fetchone()[0]
+            finally:
+                con.close()
+        except sqlite3.Error:
+            pass  # file mid-creation; the app owns it and will settle
+        if count >= 1:
+            return
+        if time.monotonic() > deadline or proc.poll() is not None:
+            proc.kill()
+            proc.wait()
+            pytest.fail("CLI never reached the delivery phase")
+        time.sleep(0.05)
+
+
 def lock_pid(data: Path) -> int:
     parts = (data / "bot.lock").read_text(encoding="utf-8").split()
     return int(parts[1])
@@ -117,6 +149,7 @@ def test_sigterm_during_send_keeps_every_alert_durable(tmp_path):
     proc = start_cli(data, tmp_path / "send.log", ["--at", OPEN_AT],
                      {BLOCK_SECONDS_ENV: "5"})
     assert lock_pid(data) == proc.pid
+    wait_for_delivery_phase(data, proc)
     start = time.monotonic()
     proc.send_signal(signal.SIGTERM)
     rc = proc.wait(timeout=15)
@@ -135,6 +168,7 @@ def test_second_sigterm_is_idempotent_no_corruption(tmp_path):
     data = tmp_path / "data"
     proc = start_cli(data, tmp_path / "twice.log", ["--at", OPEN_AT],
                      {BLOCK_SECONDS_ENV: "5"})
+    wait_for_delivery_phase(data, proc)
     proc.send_signal(signal.SIGTERM)
     proc.send_signal(signal.SIGTERM)  # repeated cancel: must be a no-op
     rc = proc.wait(timeout=15)
