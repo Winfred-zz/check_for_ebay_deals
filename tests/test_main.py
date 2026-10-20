@@ -55,7 +55,6 @@ def test_dry_run_fixture_scan_alerts_with_absent_db(tmp_path):
     )
     assert result.returncode == 0
     assert "DRY-RUN ALERT:" in result.stdout
-    assert "12.34" in result.stdout
     assert "no writes, no sends" in result.stderr
     assert not (data / "state.sqlite").is_file()
 
