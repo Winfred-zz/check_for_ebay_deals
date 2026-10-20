@@ -6,6 +6,13 @@ target-version = "py312"
 select = ["E4", "E7", "E9", "F", "E5"]
 ignore = []
 
+
+# basedpyright gate: strict standard-mode errors (imports, calls,
+# member access, arguments, syntax) must stay at 0. The 24 warnings in
+# these modes (style/Any-annotations on the full app set) are advisory
+# and do not fail the gate; CI treats exit 0 as green.
+[tool.basedpyright]
+typeCheckingMode = "strict"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

@@ -16,7 +16,7 @@ strategy. User-facing setup lives in `README.md`; implementation notes do not.
 | Delivery | At-least-once. Failed sends stay pending for retry; a crash after send but before recording success may duplicate (documented small window). Never record a failed send as sent. |
 | Cadence | One scan per hour, finish-to-start scheduling with no overlap; bounded per-search work; cancellation honored. |
 | Failures | Configuration errors stop startup with actionable messages and nonzero exit. Transient HTTP/retry-exhaustion failures for one search are recoverable and logged; they must not silently become "no matches" successes for that scan and monitoring continues. |
-| Instance | Single running instance enforced by a lockfile check at startup; a second instance refuses to start. Concurrency support is explicitly out of scope. |
+| Instance | Single running instance enforced by an exclusive `flock` on `bot.lock` (kernel-released on holder death; no stale-PID probing); a second instance exits 3. Concurrency support is explicitly out of scope. |
 | Deployment | Primary model: self-contained Docker image (application copied in), plus documented direct Python install. State/logs in a user-writable volume `/data` (non-root runtime user). Shutdown bound: 10 seconds on SIGTERM. |
 | Operational status | Bot currently stopped/not deployed (owner-reported). |
 
@@ -28,13 +28,14 @@ check_for_ebay_deals.py   entry point: CLI parsing, config validation, logging
                           hourly scan loop with pending-alert delivery
 config.py                 Config/ConfigError: reads .env (optional), CSV,
                           validates headers/rows/ceilings, path overrides
-acquire.py                fetch_search_page(): requests session, status
-                          classification, bounded retry with Retry-After,
-                          overall time budget, cancellation checkpoint
-parse.py                  parse_search_html(): pure function; BeautifulSoup
-                          defensive per-card parsing, USD parsing, condition
-                          exclusion, ID extraction, dedup of cards
-select.py                 choose_alerts(): deterministic cheapest-eligible
+acquire.py                fetch_search_page_async(): aiohttp fetch under a
+                          per-search deadline; status classification, bounded
+                          cancellable retry, Retry-After parsing, cancel_event
+parse.py                  parse_search_page(): single-pass BeautifulSoup parse
+                          returning cards + a layout classification (deny /
+                          no-results / results); USD parsing, condition
+                          exclusion, ID extraction, card dedup (cheapest wins)
+selection.py              choose_alerts(): deterministic cheapest-eligible
                           selection given parsed items, ceilings and sent
                           set; tie handled by first-seen stable order
 clock.py                quiet-window predicate on injected clock (UTC
@@ -47,16 +48,18 @@ notify.py                 render_alert_message(): markdown-escaped friendly
                           name, validated https ebay URL, no mentions
                           (suppression), Discord length caps without
                           truncating URLs
-logs:  logging configured once in main; single rotating file runs/-style
-       not required — keep logs/ per existing convention, stdout INFO /
-       file DEBUG+, uncaught exceptions logged CRITICAL before exit
+logs:  logging configured once in main under the state root
+       (--data-dir/logs/bot.log); setup_logging is invocation-idempotent
+       (removes its own tagged handlers first), console INFO / file DEBUG+
+       rotating, uncaught exceptions logged CRITICAL before exit
 ```
 
-State database: `data/state.sqlite` (path configurable). Pending alerts are
-persisted before send; mark-sent happens only after a successful Discord send.
-Legacy `configs/skip_items.txt` IDs are imported into `sent` on first open,
-with the legacy file copied to `data/skip_items.txt.migrated-<stamp>.bak`
-(ignored by git, retained).
+State database: `data/state.sqlite` (path configurable, schema version 1).
+Pending alerts are persisted before send; mark-sent happens only after a
+successful Discord send (crash after send, before mark-sent, replays the
+row: at-least-once, never marks a failed send). Legacy `configs/skip_items.txt`
+IDs are imported into `sent` with INSERT-OR-IGNORE, so re-opening is
+idempotent and the legacy file is read, never written, never deleted (CR06).
 
 ## Testing strategy
 
@@ -109,11 +112,13 @@ with the legacy file copied to `data/skip_items.txt.migrated-<stamp>.bak`
   handler (single process instance; the shared multiprocess helper is
   not required because of single-instance enforcement). Console INFO,
   file DEBUG+, retention documented as maxBytes/backupCount actuals.
-- F26: Discord lifecycle = login ONCE in main, then
-  `connect(reconnect=False)`; `wait_until_ready()` gates the first
-  scan; the ready banner logs only after readiness; per-pass
-  `fetch_channel(channel_id)` replaces any cached-channel assumption
-  (Forbidden/NotFound logs and leaves pending alerts pending).
-  Shutdown: SIGTERM raises Shutdown inside the running scan; the drain
-  is bounded, releases the instance lock, pending rows stay durable.
-  The token value is never echoed in logs or errors.
+- F26: Discord lifecycle = login ONCE in main, then a supervised
+  background task `connect(reconnect=True)`; `wait_until_ready()` under a
+  bounded timeout gates the first scan (ready banner logs only after
+  readiness; login rejection -> exit 4, gateway never ready in window ->
+  exit 1). Per-pass `fetch_channel(channel_id)` replaces any cached-channel
+  assumption (Forbidden/NotFound/HTTPException logs and leaves pending
+  alerts pending). Shutdown: SIGTERM requests cooperative cancellation
+  inside the running scan/send; the drain is bounded (10s), the gateway
+  task + client + session are closed, the flock is released, and pending
+  rows stay durable. The token value is never echoed in logs or errors.

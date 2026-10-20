@@ -30,10 +30,12 @@ You must create the Discord bot and invite it to the channel yourself
 ## Running
 
 ```
-.venv/bin/python check_for_ebay_deals.py                 # hourly loop
-.venv/bin/python check_for_ebay_deals.py --once          # single scan (cron)
-.venv/bin/python check_for_ebay_deals.py --dry-run       # print alerts, no sends/writes
-.venv/bin/python check_for_ebay_deals.py --once --fixture-dir tests/fixtures/offline-scan
+.venv/bin/python check_for_ebay_deals.py                          # hourly loop
+.venv/bin/python check_for_ebay_deals.py --once                   # single scan (cron)
+.venv/bin/python check_for_ebay_deals.py --dry-run                # print alerts, no sends/writes
+.venv/bin/python check_for_ebay_deals.py --once --dry-run \
+  --fixture-dir tests/fixtures/offline-scan --csv \
+  tests/fixtures/offline-scan/smoke.csv --data-dir /tmp/deals-fx   # offline fixture scan
 ```
 
 Flags: `--csv PATH`, `--data-dir DIR`, `--env-file FILE`, `--at ISO-UTC`
@@ -48,15 +50,31 @@ Behavior:
 - Outside quiet hours, stored pending alerts are delivered first
   (at-least-once: a failed send leaves rows pending; the next run
   retries them).
-- State lives in `data/` (`state.sqlite` + `bot.lock`). A second running
-  instance refuses to start while another live PID holds the lock; a
-  lock left by a dead PID is reclaimed.
+- State lives in the `--data-dir` root (default `data/`): `state.sqlite`,
+  `bot.lock`, and `logs/bot.log`. A `flock` on `bot.lock` gives single
+  instance; a second run exits `3`. The kernel releases the lock when the
+  holder dies, so a crashed instance never leaves a stale lock.
 - `SIGTERM` cancels the running scan within ~10s and releases the lock;
   pending rows stay durable — a restart resumes them.
 
 Exit codes: `0` normal, `2` config/state refused at startup
 (actionable message on stderr), `3` another instance holds the lock,
-`4` Discord login rejected.
+`4` Discord login rejected, `5` required `--once` work failed (failed
+searches or persistent send failures; rows stay durable for the next run),
+`1` unexpected failure (logged, never swallowed).
+
+Alerts are capped at Discord's 2000-character limit: friendly names are
+Markdown-escaped and trimmed so the item URL always stays byte-intact.
+
+## Offline testing
+
+`--fixture-dir DIR` scans local HTML (`manifest.json` maps each CSV query
+to a page file) and never contacts eBay. Non-dry fixture runs require an
+explicit `--data-dir` (they must not write the real state root). Stub
+knobs apply only to fixture runs: `CHECK_FOR_EBAY_DEALS_STUB_FAIL_AFTER=N`
+(fail sends after N), `CHECK_FOR_EBAY_DEALS_STUB_BLOCK_SECONDS=S` (block
+each send S s), `CHECK_FOR_EBAY_DEALS_SCAN_SLEEP_SECONDS=S` (pause S s
+before fetching) — provided for shutdown/at-least-once tests.
 
 ## Running with Docker
 
@@ -66,14 +84,15 @@ the anonymous-volume copy-up):
 
 ```
 docker build -t check_for_ebay_deals .
-docker run --volumes \
-  --mount type=volume,destination=/data \
-  --mount type=bind,src=./configs,dst=/data/configs \
+docker run --rm \
+  --env-file .env \
+  -v deals-data:/data \
+  -v "$PWD/configs:/data/configs:ro" \
   check_for_ebay_deals
 ```
 
-`/data` holds state (`/data/data`) and logs (`/data/logs`); the bound
-`configs/` supplies the search CSV.
+`/data` holds state (`/data/state.sqlite`), lock (`/data/bot.lock`), and
+logs (`/data/logs`); the bound `configs/` supplies the search CSV.
 
 ## Limits
 

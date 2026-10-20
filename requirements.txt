@@ -1,5 +1,5 @@
 -c constraints.txt
-requests
+aiohttp
 beautifulsoup4
 lxml
 discord.py

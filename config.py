@@ -57,7 +57,11 @@ def load_env(env_file: str | None) -> EnvValues:
     if env_file:
         from dotenv import dotenv_values
 
-        values = {key: val for key, val in dotenv_values(env_file).items() if val}
+        try:
+            raw_values = dotenv_values(env_file)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ConfigError(f"env file unreadable: {exc}") from exc
+        values = {key: val for key, val in raw_values.items() if val}
     token = os.environ.get("DISCORD_TOKEN") or values.get("DISCORD_TOKEN")
     channel = os.environ.get("CHANNELID") or values.get("CHANNELID")
     if not token:
@@ -88,12 +92,19 @@ def load_search_rows(csv_path: str) -> list[SearchRow]:
     try:
         with open(csv_path, newline="", encoding="utf-8-sig") as handle:
             reader = csv.DictReader(handle)
-            missing = set(SEARCH_HEADERS) - set(reader.fieldnames or [])
+            fieldnames = list(reader.fieldnames or [])
+            missing = set(SEARCH_HEADERS) - set(fieldnames)
             if missing:
                 raise ConfigError(
                     "search CSV missing required headers: "
                     + ", ".join(sorted(missing))
                     + " (template: examples/ebay_deals_to_check.csv)"
+                )
+            counts = {name: fieldnames.count(name) for name in fieldnames}
+            duplicates = sorted(name for name, count in counts.items() if count > 1)
+            if duplicates:
+                raise ConfigError(
+                    "search CSV has duplicate headers: " + ", ".join(duplicates)
                 )
             rows: list[SearchRow] = []
             for line_no, row in enumerate(reader, start=2):
@@ -116,6 +127,12 @@ def load_search_rows(csv_path: str) -> list[SearchRow]:
                 )
     except UnicodeError as exc:
         raise ConfigError(f"search CSV is not valid UTF-8 text: {exc}") from exc
+    except (csv.Error, OSError) as exc:
+        raise ConfigError(f"search CSV unreadable at {csv_path}: {exc}") from exc
+    if not rows:
+        raise ConfigError(
+            f"search CSV has headers but no search rows: {csv_path}"
+        )
     return rows
 
 

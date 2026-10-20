@@ -31,3 +31,5 @@ examples/
 *.zip
 myebayfunctions.py
 myhelperfunctions.py
+.env
+.env.*
