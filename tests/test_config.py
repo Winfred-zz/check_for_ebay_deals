@@ -161,3 +161,39 @@ class TestEnv:
         values = config.load_env(None)
         assert values["discord_token"] == secret
         assert values["channel_id"] == 98765
+
+
+class TestEbayCredentials:
+    def test_owner_only_credentials_load_without_echo(self, tmp_path):
+        path = tmp_path / "credentials.json"
+        path.write_text('{"client_id":" id ","client_secret":" secret "}')
+        path.chmod(0o600)
+        assert config.load_ebay_credentials(str(path)) == {
+            "client_id": "id", "client_secret": "secret",
+        }
+
+    @pytest.mark.parametrize("contents", [
+        '{"client_id":"private-id","client_secret":""}',
+        '{"client_id":42,"client_secret":"private-secret"}',
+        '{"client_id":"private-id","client_secret":"private-secret"',
+        '["private-secret"]',
+    ])
+    def test_invalid_credentials_fail_without_exposing_values(self, tmp_path, contents):
+        path = tmp_path / "credentials.json"
+        path.write_text(contents)
+        path.chmod(0o600)
+        with pytest.raises(config.ConfigError) as exc:
+            config.load_ebay_credentials(str(path))
+        assert "private-secret" not in str(exc.value)
+        assert "private-id" not in str(exc.value)
+
+    def test_world_readable_secret_is_refused(self, tmp_path):
+        path = tmp_path / "credentials.json"
+        path.write_text('{"client_id":"id","client_secret":"secret"}')
+        path.chmod(0o644)
+        with pytest.raises(config.ConfigError, match="permissions 0600"):
+            config.load_ebay_credentials(str(path))
+
+    def test_missing_credentials_file_is_config_error(self, tmp_path):
+        with pytest.raises(config.ConfigError, match="not found"):
+            config.load_ebay_credentials(str(tmp_path / "missing.json"))

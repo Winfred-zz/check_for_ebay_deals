@@ -1,8 +1,9 @@
 # check_for_ebay_deals — design record
 
-Status: implementation in progress against `handoff/0001.md`. This file records
-approved requirements, the architecture for the remediation, and the testing
-strategy. User-facing setup lives in `README.md`; implementation notes do not.
+Status: Browse API integration is running on Ferb in container `ebay-deals`.
+Production API dry-run covered all nine configured searches, with one qualifying
+listing and no failed searches. The first live scan imported two legacy sent IDs,
+delivered one new alert to Discord, and left no pending alerts.
 
 ## Approved behavioral contract (owner-approved, from handoff 0001)
 
@@ -26,15 +27,15 @@ strategy. User-facing setup lives in `README.md`; implementation notes do not.
 check_for_ebay_deals.py   entry point: CLI parsing, config validation, logging
                           setup once, SIGTERM handling, Discord lifecycle,
                           hourly scan loop with pending-alert delivery
-config.py                 Config/ConfigError: reads .env (optional), CSV,
-                          validates headers/rows/ceilings, path overrides
-acquire.py                fetch_search_page_async(): aiohttp fetch under a
-                          per-search deadline; status classification, bounded
-                          cancellable retry, Retry-After parsing, cancel_event
-parse.py                  parse_search_page(): single-pass BeautifulSoup parse
-                          returning cards + a layout classification (deny /
-                          no-results / results); USD parsing, condition
-                          exclusion, ID extraction, card dedup (cheapest wins)
+config.py                 Config/ConfigError: reads Discord env, eBay
+                          application credential JSON, CSV; validates
+                          permissions, headers, rows, ceilings and overrides
+acquire.py                BrowseClient: OAuth client-credentials token
+                          held in memory; bounded async Browse API searches,
+                          Retry-After, cancellation and strict result mapping
+parse.py                  parse_search_page(): single-pass HTML parser for
+                          offline fixtures; USD parsing, condition exclusion,
+                          safe URL/ID extraction and duplicate handling
 selection.py              choose_alerts(): deterministic cheapest-eligible
                           selection given parsed items, ceilings and sent
                           set; tie handled by first-seen stable order
@@ -54,6 +55,26 @@ logs:  logging configured once in main under the state root
        rotating, uncaught exceptions logged CRITICAL before exit
 ```
 
+## Live Browse API acquisition
+
+Production requests use `https://api.ebay.com/buy/browse/v1/item_summary/search`
+with an application access token from the production Client ID / Client Secret.
+The credential JSON path is selected by `--ebay-credentials`, then
+`EBAY_CREDENTIALS_FILE`, then
+`~/.config/check-for-ebay-deals/ebay-production.json`. The file must be
+owner-only (`0600`); tokens are cached in memory until shortly before expiry
+and are never logged or persisted.
+
+Each unique CSV query requests one page (up to 200 summaries), sorted by price,
+marketplace `EBAY_US`, fixed-price buying option, US item location, and zero
+maximum delivery cost. USD price, valid canonical eBay item URL, matching
+numeric legacy item ID, US location, fixed-price eligibility, free USD
+shipping, parts-only condition, and the CSV ceiling are checked before
+selection. The numeric legacy item ID remains the sent-history key. API
+warnings/errors are treated as failed searches so ignored filters cannot
+silently broaden the search. Production never falls back to HTML scraping.
+Fixture mode continues parsing tracked HTML and cannot contact eBay.
+
 State database: `data/state.sqlite` (path configurable, schema version 1).
 Pending alerts are persisted before send; mark-sent happens only after a
 successful Discord send (crash after send, before mark-sent, replays the
@@ -63,17 +84,11 @@ idempotent and the legacy file is read, never written, never deleted (CR06).
 
 ## Testing strategy
 
-- Unit: parse (fixtures incl. valid/absent subtitle, "Parts Only",
-  malformed cards, seller-info leaks, USD/currency/range/malformed prices,
-  malformed+duplicate IDs, malformed card then valid card, empty page,
-  unexpected layout marker); acquire (mocked session: statuses 200/404/
-  429+Retry-After/5xx/timeout/connection, retry exhaustion, cancel — no
-  real sleeps); select (below/equal/above ceiling, skipped cheapest,
-  already-alerted price drop, later cheaper, duplicate cross-search,
-  ties, empty); clock (01:59/02:00/11:59/12:00/12:59/13:00, UTC fixed
-  clock; DST: UTC never shifts — assert explicit injected-clock DST
-  boundary cases for the configured zone logic incl. Europe/London-style
-  behavior via a tz-aware test clock).
+- Unit: HTML parsing (fixtures incl. valid/absent subtitle, "Parts Only",
+  malformed cards, seller-info leaks, USD/currency/range/malformed prices);
+  Browse API acquisition (loopback-only OAuth, normalization, ID retention,
+  token cache/refresh, bounded HTTP errors, body limits and cancellation).
+- Clock: 01:59/02:00/11:59/12:00/12:59/13:00; UTC does not shift for DST.
 - Integration (offline): state (failed send stays pending, restart
   resumes, partial batch failure, corrupt-state refusal, legacy
   migration, disk write failure, lockfile instance enforcement);
@@ -86,10 +101,9 @@ idempotent and the legacy file is read, never written, never deleted (CR06).
 - Process-level: SIGTERM bounded shutdown exercised; invalid config
   exits nonzero with actionable message from a foreign cwd; import has
   no side effects.
-- Manual/exploratory: fixture-driven runs against temporary dirs;
-  loopback HTTP server (localhost only) for one acquisition integration;
-  live Discord/eBay check only with separate authorization (expected
-  unavailable → recorded limit).
+- Manual/exploratory: fixture-driven runs against temporary dirs; separately
+  verify production OAuth and one Browse API result without Discord delivery;
+  live Discord delivery requires an authorized test target.
 - No coverage gates; no tests of source strings/copied config/
   incidental defaults/mock echo forwarding.
 

@@ -66,6 +66,10 @@ def prepare_live(monkeypatch: pytest.MonkeyPatch, client_cls: type) -> None:
     monkeypatch.setenv("CHANNELID", "123456789012345678")
     monkeypatch.delenv(DISABLE_NETWORK_ENV, raising=False)
     monkeypatch.setattr(discord, "Client", lambda **kw: client_cls(**kw))
+    monkeypatch.setattr(
+        cfd.config, "load_ebay_credentials",
+        lambda path: {"client_id": "fake-id", "client_secret": "fake-secret"},
+    )
 
 
 def test_login_rejection_maps_to_exit_4(tmp_path: Path, monkeypatch):

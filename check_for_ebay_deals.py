@@ -72,7 +72,7 @@ import notify
 import parse
 import selection
 import state
-from config import EnvValues, SearchRow
+from config import EbayCredentials, EnvValues, SearchRow
 from parse import ParsedPage
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -323,7 +323,7 @@ async def scan_pass(
     con: sqlite3.Connection | None,
     fixture_dir: str | None,
     manifest: dict[str, str],
-    session: aiohttp.ClientSession | None,
+    browse_client: acquire.BrowseClient | None,
     client: discord.Client | None,
     sender: Callable[[str], Awaitable[None]] | None,
     channel_id: int | None,
@@ -348,7 +348,7 @@ async def scan_pass(
     }
     active_sender = sender
     if dry:
-        await _deliver_dry(con, rows, fixture_dir, manifest, session, monotonic,
+        await _deliver_dry(con, rows, fixture_dir, manifest, browse_client, monotonic,
                            shutdown, logger, outcome)
         return outcome
     if not dry and con is not None:
@@ -376,7 +376,6 @@ async def scan_pass(
             outcome["cancelled"] = True
             break
         query = row["search_query"]
-        html: str | None = None
         try:
             if fixture_dir is not None:
                 with open(
@@ -384,10 +383,10 @@ async def scan_pass(
                     encoding="utf-8",
                 ) as handle:
                     html = handle.read()
+                page: ParsedPage = parse.parse_search_page(html)
             else:
-                assert session is not None  # live scan: lifecycle provides one
-                html = await acquire.fetch_search_page_async(
-                    session,
+                assert browse_client is not None
+                page = await browse_client.search(
                     query,
                     deadline_monotonic=monotonic() + SCAN_BUDGET_SECONDS,
                     cancel_event=shutdown.cancel_event,
@@ -415,8 +414,6 @@ async def scan_pass(
                 exc,
             )
             continue
-        assert html is not None
-        page: ParsedPage = parse.parse_search_page(html)  # single pass (CR22)
         for card in page["rejected"]:
             logger.info(
                 "rejected card for %r: %s at position %d",
@@ -472,7 +469,7 @@ async def _deliver_dry(
     rows: list[SearchRow],
     fixture_dir: str | None,
     manifest: dict[str, str],
-    session: aiohttp.ClientSession | None,
+    browse_client: acquire.BrowseClient | None,
     monotonic: Callable[[], float],
     shutdown: ShutdownState,
     logger: logging.Logger,
@@ -499,10 +496,10 @@ async def _deliver_dry(
                     encoding="utf-8",
                 ) as handle:
                     html = handle.read()
+                page = parse.parse_search_page(html)
             else:
-                assert session is not None
-                html = await acquire.fetch_search_page_async(
-                    session,
+                assert browse_client is not None
+                page = await browse_client.search(
                     query,
                     deadline_monotonic=monotonic() + SCAN_BUDGET_SECONDS,
                     cancel_event=shutdown.cancel_event,
@@ -515,7 +512,6 @@ async def _deliver_dry(
             outcome["failed_searches"] += 1
             logger.error("permanent scan failure for %r: %s", query, exc)
             continue
-        page = parse.parse_search_page(html)
         items_by_query[query] = page["items"]
     excluded: set[str] = set()
     if con is not None:
@@ -637,6 +633,7 @@ async def lifecycle(
     rows: list[SearchRow],
     con: sqlite3.Connection | None,
     env: EnvValues | None,
+    ebay_credentials: EbayCredentials | None,
     manifest: dict[str, str] | None,
     stub_fail_after: int | None,
     stub_block_seconds: float,
@@ -696,6 +693,14 @@ async def lifecycle(
             )
             session = aiohttp.ClientSession()
         manifest_map: dict[str, str] = manifest or {}
+        browse_client: acquire.BrowseClient | None = None
+        if fixture_dir is None:
+            assert session is not None and ebay_credentials is not None
+            browse_client = acquire.BrowseClient(session, ebay_credentials)
+            logger.info(
+                "eBay Browse API acquisition enabled "
+                "(US, fixed-price, free shipping)"
+            )
         failed_searches = 0
         send_failures = 0
         while True:
@@ -707,7 +712,7 @@ async def lifecycle(
                 con=con,
                 fixture_dir=fixture_dir,
                 manifest=manifest_map,
-                session=session,
+                browse_client=browse_client,
                 client=client,
                 sender=sender,
                 channel_id=channel_id,
@@ -814,6 +819,14 @@ def main(argv: list[str] | None = None) -> int:
         help="optional .env file; process environment values win",
     )
     _ = parser.add_argument("--csv", default=DEFAULT_CSV, help="search CSV path")
+    _ = parser.add_argument(
+        "--ebay-credentials",
+        default=os.environ.get(
+            "EBAY_CREDENTIALS_FILE",
+            os.path.expanduser("~/.config/check-for-ebay-deals/ebay-production.json"),
+        ),
+        help="owner-only JSON containing production client_id and client_secret",
+    )
     args = parser.parse_args(argv)
 
     dry_run = cast("bool", args.dry_run)
@@ -823,9 +836,11 @@ def main(argv: list[str] | None = None) -> int:
     env_file = cast("str | None", args.env_file)
     at_raw = cast("str | None", args.at)
     fixture_dir = cast("str | None", args.fixture_dir)
+    ebay_credentials_path = cast("str", args.ebay_credentials)
 
     shutdown = ShutdownState()
     env: EnvValues | None = None
+    ebay_credentials: EbayCredentials | None = None
     start_at: datetime | None = None
     manifest: dict[str, str] | None = None
     con: sqlite3.Connection | None = None
@@ -880,6 +895,8 @@ def main(argv: list[str] | None = None) -> int:
                 "network disabled for this run; non-fixture scans (dry-run"
                 " included) need live eBay access (use --fixture-dir offline)"
             )
+        if fixture_dir is None:
+            ebay_credentials = config.load_ebay_credentials(ebay_credentials_path)
         if not dry_run and not fixture_dir:
             env = config.load_env(env_file)
         # CR04: kernel lock BEFORE any state work, so a refused
@@ -930,6 +947,7 @@ def main(argv: list[str] | None = None) -> int:
                 rows=rows,
                 con=con,
                 env=env,
+                ebay_credentials=ebay_credentials,
                 manifest=manifest,
                 stub_fail_after=stub_fail_after,
                 stub_block_seconds=stub_block_seconds,

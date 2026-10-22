@@ -10,10 +10,13 @@ runs. Errors are ConfigError with actionable, non-secret messages.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
+import stat
 from decimal import Decimal, InvalidOperation
-from typing import TypedDict
+from pathlib import Path
+from typing import TypedDict, cast
 
 CHANNELID_RE = re.compile(r"^[0-9]{1,25}$")
 SEARCH_HEADERS = ("max_price", "friendly_name", "search_query")
@@ -35,6 +38,37 @@ class EnvValues(TypedDict):
 class ConfigError(Exception):
     """Actionable startup configuration failure; carries no secrets."""
 
+
+
+class EbayCredentials(TypedDict):
+    """Production application credentials; never include values in diagnostics."""
+    client_id: str
+    client_secret: str
+
+
+def load_ebay_credentials(path: str) -> EbayCredentials:
+    """Load owner-only JSON without echoing credential values on failure."""
+    source = Path(path)
+    try:
+        if not source.is_file():
+            raise ConfigError(f"eBay credentials file not found: {path}")
+        if stat.S_IMODE(source.stat().st_mode) & 0o077:
+            raise ConfigError("eBay credentials file must have permissions 0600")
+        raw: object = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        raise ConfigError(
+            "eBay credentials file is unreadable or invalid JSON"
+        ) from None
+    if not isinstance(raw, dict):
+        raise ConfigError("eBay credentials must be a JSON object")
+    raw_object = cast("dict[object, object]", raw)
+    client_id = raw_object.get("client_id")
+    client_secret = raw_object.get("client_secret")
+    if not isinstance(client_id, str) or not client_id.strip():
+        raise ConfigError("eBay credentials require a nonempty client_id")
+    if not isinstance(client_secret, str) or not client_secret.strip():
+        raise ConfigError("eBay credentials require a nonempty client_secret")
+    return {"client_id": client_id.strip(), "client_secret": client_secret.strip()}
 
 def _validate_ceiling(raw: str) -> None:
     try:
