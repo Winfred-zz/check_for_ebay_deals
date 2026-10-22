@@ -1,8 +1,8 @@
 # check_for_ebay_deals
 
-Checks configured eBay searches once per hour and posts one alert per
-search to a single Discord channel. Alert decisions are computed
-locally — nothing renders a human decision at runtime.
+Monitors configured eBay searches hourly and sends one alert per qualifying
+item to a single Discord channel. Live searches use eBay's official Browse API;
+offline fixtures use saved HTML and never access eBay.
 
 ## Setup
 
@@ -24,6 +24,14 @@ Configure two things (both gitignored user-local files):
    `--env-file`. Template: `examples/.env.example`. Never commit a real
    token; the app never prints the token value.
 
+3. **eBay production API** — create production application keys in the eBay
+   Developer Program. Store both App ID (Client ID) and Cert ID (Client Secret)
+   as JSON in `~/.config/check-for-ebay-deals/ebay-production.json`, owned by
+   you with mode `0600`; the parent directory should be `0700`. Never commit or
+   paste these values. Override the path with `--ebay-credentials PATH` or
+   `EBAY_CREDENTIALS_FILE`. The app requests an application token in memory;
+   it never logs or persists the token.
+
 You must create the Discord bot and invite it to the channel yourself
 (<https://realpython.com/how-to-make-a-discord-bot-python/>).
 
@@ -38,7 +46,8 @@ You must create the Discord bot and invite it to the channel yourself
   tests/fixtures/offline-scan/smoke.csv --data-dir /tmp/deals-fx   # offline fixture scan
 ```
 
-Flags: `--csv PATH`, `--data-dir DIR`, `--env-file FILE`, `--at ISO-UTC`
+Flags: `--csv PATH`, `--data-dir DIR`, `--env-file FILE`,
+`--ebay-credentials PATH` (or `EBAY_CREDENTIALS_FILE`), `--at ISO-UTC`
 (deterministic clock, e.g. `2026-10-19T13:00:00Z`), `--once`,
 `--dry-run`, `--fixture-dir DIR` (offline fixture scans never contact
 eBay).
@@ -78,17 +87,17 @@ before fetching) — provided for shutdown/at-least-once tests.
 
 ## Running with Docker
 
-Self-contained image (user configs bind-mounted; state/logs on a
-volume, created with an image-baked ancestor layer so ownership survives
-the anonymous-volume copy-up):
+Self-contained image (CSV and secrets mounted read-only; state/logs on a
+named volume):
 
 ```
 docker build -t check_for_ebay_deals .
 docker run --rm \
   --env-file .env \
+  -v "$HOME/.config/check-for-ebay-deals/ebay-production.json:/run/secrets/ebay-production.json:ro" \
   -v deals-data:/data \
   -v "$PWD/configs:/data/configs:ro" \
-  check_for_ebay_deals
+  check_for_ebay_deals --ebay-credentials /run/secrets/ebay-production.json
 ```
 
 `/data` holds state (`/data/state.sqlite`), lock (`/data/bot.lock`), and
@@ -96,8 +105,9 @@ logs (`/data/logs`); the bound `configs/` supplies the search CSV.
 
 ## Limits
 
-eBay scraping is unofficial: deny pages are detected and skipped
-(monitoring continues), and scans stay single-page, one search per row.
-The public repo carries no tokens, no personal configs, and no CI that
-could authorize the live check. See `design.md` for the full design
-record.
+Live acquisition uses one Browse API search page per unique query, sorted by
+price. It requests fixed-price US listings with free shipping, then locally
+validates USD price, item URL/identity, condition and the CSV price ceiling.
+The production path does not scrape HTML and has no fallback when the API
+rejects a request. The public repo carries no tokens, personal configs, or CI
+that can authorize a live check. See `design.md` for the full design record.

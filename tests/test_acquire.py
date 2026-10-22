@@ -1,293 +1,288 @@
-"""Integration tests for acquire.py against a loopback HTTP server only.
-
-Never touches live eBay: the server binds 127.0.0.1 (allowed by the
-network guard in conftest). Covers the CR02/CR11/CR16 contract:
-aiohttp fetches run on the event loop without starving sibling
-tasks, every fetch is bounded by an explicit monotonic budget,
-Retry-After (integer seconds AND HTTP-date) is parsed and honored —
-waits longer than the remaining budget defer the search instead of
-sleeping through them, TLS/URL failures are PERMANENT while
-connection/timeout failures stay transient, permanent 4xx is never
-retried, and cooperative cancellation interrupts a retry wait
-immediately.
-"""
+"""Official API acquisition exercised through a loopback HTTP server only."""
 
 import asyncio
+import copy
+import json
 import time
-from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
+from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
 import pytest
 
 import acquire
-import clock
-from acquire import AcquirePermanent, AcquireTransient, parse_retry_after
 
-NOW = datetime(2026, 10, 20, 12, 0, 0, tzinfo=timezone.utc)
-
-
-def _fixed_now() -> datetime:
-    return NOW
+NOW = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
+TOKEN = {"access_token": "fake-application-token", "expires_in": 7200}
+CREDS = {"client_id": "fake-client-id", "client_secret": "fake-client-secret"}
+SUMMARY = {
+    "legacyItemId": "123456789012",
+    "itemWebUrl": "https://www.ebay.com/itm/title/123456789012?tracking=x",
+    "title": "Used drive", "price": {"value": "19.50", "currency": "USD"},
+    "buyingOptions": ["FIXED_PRICE"], "itemLocation": {"country": "US"},
+    "shippingOptions": [{"shippingCost": {"value": "0.00", "currency": "USD"}}],
+    "conditionId": "3000", "seller": {"username": "example"},
+}
+PAGE = {"total": 1, "itemSummaries": [SUMMARY]}
 
 
 @contextmanager
-def server(
-    responses: list[tuple[int, dict[str, str], str]],
-    delays: dict[int, float] | None = None,
-):
-    hits: list[str] = []
-    wait_by_index = delays or {}
+def server(*, tokens=None, searches=None, delay=0.0):
+    token_responses = tokens or [(200, {}, TOKEN)]
+    search_responses = searches or [(200, {}, PAGE)]
+    requests = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            hits.append(self.path)
-            idx = min(len(hits) - 1, len(responses) - 1)
-            status, headers, body = responses[idx]
-            delay = wait_by_index.get(idx, 0.0)
-            if delay:
-                time.sleep(delay)
-            payload = body.encode()
+        def handle_request(self):
+            route = urlsplit(self.path).path
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            prior = sum(r[0] == route for r in requests)
+            requests.append((route, self.path, dict(self.headers), body))
+            responses = token_responses if route == "/token" else search_responses
+            status, headers, data = responses[min(prior, len(responses) - 1)]
+            payload = (
+                data.encode() if isinstance(data, str) else json.dumps(data).encode()
+            )
             self.send_response(status)
             for key, value in headers.items():
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
+            if route != "/token":
+                time.sleep(delay)
+            with suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(payload)
 
-        def log_message(self, format, *args) -> None:
+        do_GET = handle_request
+        do_POST = handle_request
+
+        def log_message(self, *args):
             pass
 
     http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = Thread(target=http.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{http.server_port}/", hits
+        yield f"http://127.0.0.1:{http.server_port}", requests
     finally:
         http.shutdown()
         http.server_close()
         thread.join()
 
 
-def _run_fetch(
-    url: str,
-    *,
-    budget: float = 30.0,
-    deadline: float | None = None,
-    max_retries: int = 4,
-    monotonic: Callable[[], float] = time.monotonic,
-    utc_now: Callable[[], datetime] = clock.utc_now,
-) -> str:
-    async def go() -> str:
-        async with aiohttp.ClientSession() as session:
-            return await acquire.fetch_search_page_async(
-                session,
-                "query",
-                url=url,
-                deadline_monotonic=(
-                    time.monotonic() + budget if deadline is None else deadline
-                ),
-                cancel_event=asyncio.Event(),
-                max_retries=max_retries,
-                monotonic=monotonic,
-                utc_now=utc_now,
-            )
+def client(session, root, **kwargs):
+    return acquire.BrowseClient(
+        session, CREDS, token_url=root + "/token", search_url=root + "/search",
+        utc_now=lambda: NOW, **kwargs,
+    )
 
+
+async def search(api, *, budget=10.0, event=None):
+    return await api.search(
+        "drive -parts", deadline_monotonic=time.monotonic() + budget,
+        cancel_event=event or asyncio.Event(),
+    )
+
+
+def fetch(root, **kwargs):
+    async def go():
+        async with aiohttp.ClientSession() as session:
+            return await search(client(session, root, **kwargs))
     return asyncio.run(go())
 
 
-def _stepping_clock(step: float):
-    state = {"t": 0.0}
-
-    def tick() -> float:
-        current = state["t"]
-        state["t"] = current + step
-        return current
-
-    return tick
-
-
-def test_rate_limit_honors_retry_after() -> None:
-    with server([(429, {"Retry-After": "1"}, ""), (200, {}, "results")]) as info:
-        url, hits = info
-        html = _run_fetch(url)
-        assert html == "results"
-        assert len(hits) == 2
-
-
-def test_redirect_chain_is_followed_to_success() -> None:
-    with server(
-        [(302, {"Location": "/next-page"}, ""), (200, {}, "results")]
-    ) as info:
-        url, hits = info
-        html = _run_fetch(url)
-        assert html == "results"
-        assert len(hits) == 2
-        assert hits[1].startswith("/next-page")
+def test_authenticated_search_retains_legacy_identity_and_caches_token():
+    with server() as (root, requests):
+        async def go():
+            async with aiohttp.ClientSession() as session:
+                api = client(session, root)
+                a = await search(api)
+                b = await search(api)
+                return a, b
+        a, b = asyncio.run(go())
+    assert a == b
+    assert a["items"][0]["id"] == "123456789012"
+    assert a["items"][0]["link"] == "https://www.ebay.com/itm/123456789012"
+    assert str(a["items"][0]["price_usd"]) == "19.50"
+    assert [r[0] for r in requests] == ["/token", "/search", "/search"]
+    token_request, search_request, _ = requests
+    assert parse_qs(token_request[3].decode()) == {
+        "grant_type": ["client_credentials"], "scope": [acquire.SCOPE],
+    }
+    assert search_request[2]["Authorization"] == "Bearer fake-application-token"
+    params = parse_qs(urlsplit(search_request[1]).query)
+    assert params["q"] == ["drive -parts"]
+    assert params["filter"] == [
+        "buyingOptions:{FIXED_PRICE},itemLocationCountry:US,maxDeliveryCost:0"
+    ]
 
 
-@pytest.mark.parametrize(
-    ("status", "error", "count"),
-    [
-        (404, AcquirePermanent, 1),
-        (403, AcquirePermanent, 1),
-    ],
-)
-def test_permanent_4xx_never_retried(
-    status: int, error: type[Exception], count: int
-) -> None:
-    with server([(status, {}, "failure")]) as info:
-        url, hits = info
-        with pytest.raises(error, match=f"HTTP {status}"):
-            _run_fetch(url)
-        assert len(hits) == count
+def test_expired_token_is_refreshed_before_second_search():
+    with server() as (root, requests):
+        async def go():
+            now = [0.0]
+            async with aiohttp.ClientSession() as session:
+                api = client(session, root, monotonic=lambda: now[0])
+                for moment in (0.0, 7201.0):
+                    now[0] = moment
+                    await api.search("drive", deadline_monotonic=moment + 10,
+                                     cancel_event=asyncio.Event())
+        asyncio.run(go())
+    assert [r[0] for r in requests] == ["/token", "/search", "/token", "/search"]
 
 
-def test_transient_5xx_retries_are_bounded() -> None:
-    with server([(500, {}, "failure")]) as info:
-        url, hits = info
-        with pytest.raises(AcquireTransient, match="gave up after 1 retries"):
-            _run_fetch(url, max_retries=1)
-        assert len(hits) == 2
+def test_search_401_refreshes_once_then_succeeds():
+    with server(searches=[(401, {}, {}), (200, {}, PAGE)]) as (root, requests):
+        page = fetch(root)
+    assert page["items"][0]["id"] == "123456789012"
+    assert [r[0] for r in requests] == ["/token", "/search", "/token", "/search"]
 
 
-def test_budget_exhausted_before_attempt_defers_search() -> None:
-    with server([(200, {}, "unused")]) as info:
-        url, hits = info
-        with pytest.raises(AcquireTransient, match="budget exhausted"):
-            _run_fetch(url, deadline=0.0, monotonic=_stepping_clock(0.0))
-        assert len(hits) == 0
+def test_persistent_401_is_bounded_and_never_exposes_credentials():
+    with server(searches=[(401, {}, {"secret": CREDS})]) as (root, requests):
+        with pytest.raises(
+            acquire.AcquirePermanent, match="after token refresh"
+        ) as exc:
+            fetch(root)
+    assert len(requests) == 4
+    assert CREDS["client_secret"] not in str(exc.value)
 
 
-def test_retry_after_beyond_budget_defers_instead_of_sleeping() -> None:
-    header = formatdate((NOW + timedelta(seconds=3600)).timestamp(), usegmt=True)
-    with server([(429, {"Retry-After": header}, "")]) as info:
-        url, hits = info
-        with pytest.raises(AcquireTransient, match="exceeds remaining"):
-            _run_fetch(
-                url,
-                deadline=10.0,
-                monotonic=_stepping_clock(6.0),
-                utc_now=_fixed_now,
-            )
-        assert len(hits) == 1
+def test_token_rejection_is_not_retried_as_a_network_error():
+    with server(tokens=[(401, {}, CREDS)]) as (root, requests):
+        with pytest.raises(acquire.AcquirePermanent, match="OAuth credentials"):
+            fetch(root)
+    assert [r[0] for r in requests] == ["/token"]
 
 
-def test_expired_http_date_retry_after_retries_immediately() -> None:
-    header = formatdate((NOW - timedelta(seconds=3600)).timestamp(), usegmt=True)
-    with server([(429, {"Retry-After": header}, ""), (200, {}, "results")]) as info:
-        url, hits = info
-        html = _run_fetch(url, utc_now=_fixed_now)
-        assert html == "results"
-        assert len(hits) == 2
+@pytest.mark.parametrize("status", [302, 403, 418])
+def test_permanent_status_and_redirect_never_forward_secrets(status):
+    with server(searches=[(status, {"Location": "/other"}, {})]) as (root, requests):
+        with pytest.raises(acquire.AcquirePermanent, match=f"HTTP {status}"):
+            fetch(root)
+    assert [r[0] for r in requests] == ["/token", "/search"]
 
 
-@pytest.mark.parametrize(
-    ("header", "expected"),
-    [
-        ("7", 7.0),
-        ("0", 0.0),
-        ("-5", 0.0),
-        ("not a date", None),
-        (None, None),
-    ],
-)
-def test_parse_retry_after_seconds(header: str | None, expected: float | None) -> None:
-    assert parse_retry_after(header, _fixed_now) == expected
+def test_retry_after_http_date_then_search_success():
+    expired = formatdate((NOW - timedelta(seconds=5)).timestamp(), usegmt=True)
+    with server(searches=[(429, {"Retry-After": expired}, {}),
+                          (200, {}, PAGE)]) as (root, requests):
+        page = fetch(root)
+    assert page["items"][0]["id"] == "123456789012"
+    assert len(requests) == 3
 
 
-def test_parse_retry_after_http_date_delta() -> None:
-    future = formatdate((NOW + timedelta(seconds=90)).timestamp(), usegmt=True)
-    assert parse_retry_after(future, _fixed_now) == 90.0
-    past = formatdate((NOW - timedelta(seconds=90)).timestamp(), usegmt=True)
-    assert parse_retry_after(past, _fixed_now) == 0.0
-    naive = "Tue, 20 Oct 2026 12:01:00"
-    assert parse_retry_after(naive, _fixed_now) == 60.0
+def test_large_retry_after_does_not_sleep_past_search_budget():
+    with server(searches=[(429, {"Retry-After": "3600"}, {})]) as (root, requests):
+        with pytest.raises(acquire.AcquireTransient, match="exceeds remaining"):
+            fetch(root)
+    assert len(requests) == 2
 
 
-def test_cancellation_interrupts_retry_wait_immediately() -> None:
-    with server([(503, {}, "failure")]) as info:
-        url, hits = info
+def test_transient_failure_retries_are_bounded():
+    with server(searches=[(503, {"Retry-After": "0"}, {})]) as (root, requests):
+        with pytest.raises(acquire.AcquireTransient, match="after 1 retries"):
+            fetch(root, max_retries=1)
+    assert len(requests) == 3
 
-        async def go() -> float:
+
+def test_cancel_during_body_read_does_not_starve_heartbeat():
+    with server(delay=1.0) as (root, requests):
+        async def go():
             event = asyncio.Event()
-            started = time.monotonic()
             async with aiohttp.ClientSession() as session:
-                task = asyncio.create_task(
-                    acquire.fetch_search_page_async(
-                        session,
-                        "query",
-                        url=url,
-                        deadline_monotonic=time.monotonic() + 60.0,
-                        cancel_event=event,
-                    )
-                )
-                await asyncio.sleep(0.3)
+                task = asyncio.create_task(search(client(session, root), event=event))
+                for _ in range(100):
+                    if any(r[0] == "/search" for r in requests):
+                        break
+                    await asyncio.sleep(0.01)
+                assert any(r[0] == "/search" for r in requests)
+                start = time.monotonic()
                 event.set()
-                with pytest.raises(AcquireTransient, match="cancelled"):
+                with pytest.raises(acquire.AcquireTransient, match="cancelled"):
                     await task
-            return time.monotonic() - started
-
-        elapsed = asyncio.run(go())
-        # Backoff wanted 5 s; cancellation must cut the wait short (CR03).
-        assert elapsed < 3.0
-        assert len(hits) == 1
+                assert time.monotonic() - start < 0.5
+        asyncio.run(go())
 
 
-def test_slow_fetch_does_not_starve_sibling_tasks() -> None:
-    """CR02: a 1.5 s slow fetch must not block the event loop."""
-    with server([(200, {}, "results")], delays={0: 1.5}) as info:
-        url, _ = info
-
-        async def go() -> tuple[str, int]:
-            ticks = 0
-
-            async def heartbeat() -> None:
-                nonlocal ticks
-                while True:
-                    await asyncio.sleep(0.1)
-                    ticks += 1
-
+def test_slow_body_deadline_includes_auth_and_response_read():
+    with server(delay=0.5) as (root, _):
+        async def go():
             async with aiohttp.ClientSession() as session:
-                hb = asyncio.create_task(heartbeat())
-                html = await acquire.fetch_search_page_async(
-                    session,
-                    "query",
-                    url=url,
-                    deadline_monotonic=time.monotonic() + 30.0,
-                    cancel_event=asyncio.Event(),
-                )
-                hb.cancel()
-                with suppress(asyncio.CancelledError):
-                    await hb
-            return html, ticks
-
-        html, ticks = asyncio.run(go())
-        assert html == "results"
-        assert ticks >= 5
+                with pytest.raises(acquire.AcquireTransient):
+                    await search(client(session, root, max_retries=0), budget=0.1)
+        asyncio.run(go())
 
 
-def test_connection_failure_is_transient_and_bounded() -> None:
-    with server([(200, {}, "unused")]) as info:
-        url, _ = info
-    with pytest.raises(AcquireTransient, match="gave up after 0 retries"):
-        _run_fetch(url, max_retries=0, budget=5.0)
+@pytest.mark.parametrize("response", ["not JSON", [], {"total": 3},
+                                      {"total": 1, "itemSummaries": []},
+                                      {"errors": [{"message": "private"}]}])
+def test_malformed_response_is_not_clean_empty_search(response):
+    with server(searches=[(200, {}, response)]) as (root, _):
+        with pytest.raises(acquire.AcquirePermanent):
+            fetch(root)
 
 
-def test_tls_failure_to_plain_server_is_permanent() -> None:
-    """TLS handshake against a plain-HTTP server: config failure, CR11."""
-    with server([(200, {}, "unused")]) as info:
-        port = info[0].rsplit(":", 1)[1]
-        with pytest.raises(AcquirePermanent, match="permanent request failure"):
-            _run_fetch(f"https://127.0.0.1:{port}/")
+def test_response_size_is_bounded(monkeypatch):
+    monkeypatch.setattr(acquire, "MAX_BODY_BYTES", 1024)
+    with server(searches=[(200, {}, " " * 1025)]) as (root, _):
+        with pytest.raises(acquire.AcquirePermanent, match="body size limit"):
+            fetch(root)
 
 
-def test_layout_status_delegates_to_parse_single_pass() -> None:
-    # CR16 probe regression: "10 results" is NOT a clean empty page.
-    assert acquire.layout_status("<h1>10 results</h1>") == "suspicious"
-    assert acquire.layout_status("<div>0 results</div>") == "no-results"
-    assert acquire.layout_status("<div>Access Denied</div>") == "denied"
+def test_api_warning_cannot_silently_broaden_search():
+    page = {**PAGE, "warnings": [{"message": "filter ignored"}]}
+    with pytest.raises(acquire.AcquirePermanent, match="unsupported search"):
+        acquire.parse_results(page)
+
+
+def test_valid_zero_results_are_clean_empty():
+    page = acquire.parse_results({"total": 0})
+    assert page == {"layout": "no-results", "items": [], "rejected": [],
+                    "result_count": 0}
+
+
+@pytest.mark.parametrize("patch", [
+    {"price": {"value": "19", "currency": "EUR"}},
+    {"price": {"value": "NaN", "currency": "USD"}},
+    {"price": {"value": "-1", "currency": "USD"}},
+    {"itemWebUrl": "https://evil.example/itm/123456789012"},
+    {"legacyItemId": "222222222222"},
+    {"conditionId": "7000"},
+    {"buyingOptions": ["AUCTION"]},
+    {"itemLocation": {"country": "GB"}},
+    {"shippingOptions": []},
+    {"shippingOptions": [{"shippingCost": {"value": "5", "currency": "USD"}}]},
+])
+def test_invalid_cheapest_listing_cannot_displace_valid_sibling(patch):
+    bad = {**copy.deepcopy(SUMMARY), **patch}
+    good = {**copy.deepcopy(SUMMARY), "price": {"value": "25", "currency": "USD"}}
+    result = acquire.parse_results({"total": 2, "itemSummaries": [bad, good]})
+    assert [(x["id"], str(x["price_usd"])) for x in result["items"]] == [
+        ("123456789012", "25")
+    ]
+    assert len(result["rejected"]) == 1
+
+
+def test_cheapest_duplicate_keeps_legacy_numeric_identity():
+    high = {**SUMMARY, "price": {"value": "99", "currency": "USD"}}
+    result = acquire.parse_results({"total": 3, "itemSummaries": [high, SUMMARY, high]})
+    assert [(x["id"], str(x["price_usd"])) for x in result["items"]] == [
+        ("123456789012", "19.50")
+    ]
+
+
+@pytest.mark.parametrize(("header", "expected"), [
+    ("7", 7.0), ("0", 0.0), ("-5", 0.0), ("bad", None), (None, None),
+])
+def test_retry_after_seconds(header, expected):
+    assert acquire.parse_retry_after(header, lambda: NOW) == expected
+
+
+def test_retry_after_future_date():
+    future = formatdate((NOW + timedelta(seconds=90)).timestamp(), usegmt=True)
+    assert acquire.parse_retry_after(future, lambda: NOW) == 90
